@@ -1,0 +1,17 @@
+# Deliberately empty of rustflags.
+#
+# Nearly every iroh-on-wasm guide (and the upstream browser-echo example, which
+# pins iroh 1.0.0) tells you to set:
+#
+#   [target.wasm32-unknown-unknown]
+#   rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+#
+# That was correct for getrandom 0.3. iroh 1.0.3 depends on getrandom 0.4, where
+# the browser backend is selected by `#[cfg(feature = "wasm_js")]` instead --
+# "wasm_js" is no longer a recognised `getrandom_backend` value at all, so the
+# rustflag silently does nothing (and can trip `unexpected_cfgs` warnings).
+#
+# The equivalent is now the `wasm_js` FEATURE on our getrandom dependency; see
+# Cargo.toml. Verified against getrandom-0.4.3/src/backends.rs:172.
+#
+# Kept as a file so the next person doesn't "helpfully" re-add the flag.

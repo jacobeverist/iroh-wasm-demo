@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iroh in the browser — WASM demo</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%237aa2f7'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./main.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>iroh in the browser</h1>
+      <p>
+        The Rust p2p library <a href="https://docs.rs/iroh/latest/iroh/" target="_blank" rel="noopener">iroh</a>
+        compiled to WebAssembly, imported by a plain JavaScript module, and driven
+        entirely from this page. Open the devtools console — <code>node</code> is
+        on <code>globalThis</code>, so you can call the API by hand.
+      </p>
+      <p class="note">
+        Browsers cannot open UDP sockets, so iroh has no way to hole-punch here:
+        every connection is tunnelled over a WebSocket to a relay. Traffic stays
+        end-to-end encrypted, so the relay forwards bytes it cannot read.
+      </p>
+    </header>
+
+    <section id="identity" hidden>
+      <h2>this endpoint</h2>
+      <p>
+        <code id="endpoint-id" class="id"></code>
+        <button id="copy-id" type="button">copy</button>
+      </p>
+    </section>
+
+    <main></main>
+
+    <section id="live" hidden>
+      <h2>connect to a peer</h2>
+      <p>
+        Open this link in a second tab and it will dial this one automatically:<br />
+        <a id="share-link" target="_blank" rel="noopener"></a>
+      </p>
+      <p>Or dial from a terminal, using the same Rust code built natively:</p>
+      <pre><code id="cli-cmd"></code></pre>
+
+      <form id="connect-form">
+        <label>
+          peer endpoint id
+          <input name="endpoint-id" placeholder="paste the other tab's id" autocomplete="off" />
+        </label>
+        <label>
+          payload to echo
+          <input name="payload" value="hello over a relay" autocomplete="off" />
+        </label>
+        <button type="submit">connect</button>
+      </form>
+
+      <div class="columns">
+        <div>
+          <h3>outgoing</h3>
+          <div id="outgoing" class="connections"></div>
+        </div>
+        <div>
+          <h3>incoming</h3>
+          <div id="incoming" class="connections"></div>
+        </div>
+      </div>
+    </section>
+  </body>
+</html>
