@@ -38,6 +38,42 @@ Then open <http://localhost:8080>, wait for `relay connected`, and either:
 
 It must be served over HTTP. Opening `index.html` as a `file://` URL fails — ES module imports and `WebAssembly.instantiateStreaming` are both blocked on that scheme.
 
+## Building on NixOS
+
+> **Not verified on NixOS.** These files were written and reviewed on macOS, where no Nix is installed, so `flake.nix` / `shell.nix` have never been evaluated. Treat them as a well-researched starting point: the nixpkgs attributes referenced are confirmed to exist, but the expressions themselves are unevaluated. Fixes welcome.
+
+```bash
+nix develop          # flake.nix — pins rustc + wasm-bindgen + a wasm-capable clang
+./build.sh
+./serve.sh
+```
+
+Without flakes, `nix-shell` uses `shell.nix` instead. Everything after entering the shell is identical to any other platform.
+
+### Why a shell is needed at all
+
+Three things have to line up, and NixOS supplies none of them ambiently:
+
+1. **A rustc with the `wasm32-unknown-unknown` std.** `flake.nix` gets this from `rust-overlay` rather than the channel's rustc.
+2. **A `wasm-bindgen` binary matching `Cargo.lock` exactly** (currently 0.2.126). nixos-unstable packages these per version — `wasm-bindgen-cli_0_2_126` — which is what makes the match possible.
+3. **A clang that can target wasm32**, because `ring` compiles C.
+
+### The NixOS-specific traps
+
+**Use the *unwrapped* clang.** The nixpkgs `cc` wrapper injects host-specific flags and a host `-target`, which break the cross-compile to wasm. Both Nix files hand `cc-rs` `llvmPackages.clang-unwrapped` instead. This is safe because `ring` compiles with `-nostdlibinc` and `-DRING_CORE_NOSTDLIBINC=1`, so it needs no libc headers — the unwrapped compiler is sufficient as well as necessary.
+
+**Don't reach for `rustup` here.** Its downloaded toolchains are dynamically linked against a glibc loader that NixOS doesn't have at the usual path, so they fail with a confusing `no such file or directory` on a file that plainly exists. Use the Nix-provided toolchain, or `nix-ld`/an FHS env if you must.
+
+**`build.sh`'s prebuilt-binary fallback is deliberately musl.** If no matching `wasm-bindgen` is on `PATH`, `build.sh` downloads one. On Linux it always picks the `*-unknown-linux-musl` asset, which is statically linked and therefore runs fine on NixOS. An `aarch64-unknown-linux-gnu` asset also exists upstream and would *not* run there — don't "fix" the triple table to use it.
+
+**If your channel lacks `wasm-bindgen-cli_0_2_126`,** older channels ship a single `wasm-bindgen-cli` frozen at some version, which usually won't match `Cargo.lock`. `build.sh` will refuse to run rather than emit broken glue. Options, best first:
+
+- point the flake at a newer nixpkgs (what `flake.nix` already does);
+- drop `wasm-bindgen-cli` from the shell entirely and let `build.sh` fetch the musl binary into `.tools/`;
+- pin the `wasm-bindgen` *crate* in `Cargo.toml` to whatever version your channel packages.
+
+The `clang_multi` advice floating around iroh issue threads addresses a *different* failure (a missing 32-bit compiler surfacing as `ToolNotFound: Is 'clang' installed?`). If `build.sh` reports it can't find a wasm-capable clang, that message — not `clang_multi` — is the one to act on.
+
 ## The one architectural caveat: browsers are relay-only
 
 iroh's headline feature is hole-punching direct peer-to-peer connections. **You do not get that in a browser.** The sandbox has no API for sending UDP packets, so iroh falls back to tunnelling QUIC over a WebSocket to a relay server, and every byte is forwarded by the relay.
@@ -116,6 +152,7 @@ src/bin/cli.rs       native peer (--features cli)
 public/main.js       imports the module and calls the API
 public/index.html    the page
 build.sh / serve.sh  build and serve
+flake.nix/shell.nix  NixOS dev shell (see above; unevaluated)
 ```
 
 ## API exposed to JavaScript

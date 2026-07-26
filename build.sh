@@ -41,8 +41,11 @@ fi
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)  WBG_TRIPLE=aarch64-apple-darwin ;;
   Darwin-x86_64) WBG_TRIPLE=x86_64-apple-darwin ;;
+  # Deliberately musl on Linux: those builds are statically linked, so they run
+  # on distros without the usual FHS dynamic loader (NixOS). The -gnu asset
+  # exists for aarch64 but would fail there with "no such file or directory".
   Linux-x86_64)  WBG_TRIPLE=x86_64-unknown-linux-musl ;;
-  Linux-aarch64) WBG_TRIPLE=aarch64-unknown-linux-gnu ;;
+  Linux-aarch64) WBG_TRIPLE=aarch64-unknown-linux-musl ;;
   *) WBG_TRIPLE="" ;;
 esac
 
@@ -71,14 +74,55 @@ fi
 echo "==> wasm-bindgen: $($WBG_BIN --version) ($WBG_BIN)"
 
 # --- 2. compile ------------------------------------------------------------
-# `ring` (pulled in by iroh's tls-ring feature) compiles C. Apple's clang has no
-# wasm backend, so point cc-rs at Homebrew LLVM for this target only; the native
-# CLI build is unaffected.
+# `ring` (pulled in by iroh's tls-ring feature) compiles C for wasm32, and not
+# every clang can do that: Apple's has no wasm backend at all, and the nixpkgs
+# cc-wrapper injects host flags that break the cross-compile. So rather than
+# hardcode a path, probe candidates for one that actually works.
+#
+# These are scoped to the wasm target, so the native CLI build is unaffected.
+# An explicitly-set CC_wasm32_unknown_unknown always wins — that is how
+# flake.nix hands us the right compiler on NixOS.
 
-if [[ -x /opt/homebrew/opt/llvm/bin/clang ]]; then
-  export CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
-  export AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+can_target_wasm() {
+  [[ -n "${1:-}" && -x "${1:-}" ]] || return 1
+  echo 'int probe(void){return 0;}' |
+    "$1" --target=wasm32-unknown-unknown -nostdlibinc -c -x c - -o /dev/null 2>/dev/null
+}
+
+if [[ -z "${CC_wasm32_unknown_unknown:-}" ]]; then
+  for candidate in \
+    /opt/homebrew/opt/llvm/bin/clang \
+    /usr/local/opt/llvm/bin/clang \
+    "$(command -v clang 2>/dev/null || true)"; do
+    if can_target_wasm "$candidate"; then
+      export CC_wasm32_unknown_unknown="$candidate"
+      break
+    fi
+  done
 fi
+
+if [[ -z "${CC_wasm32_unknown_unknown:-}" ]]; then
+  cat >&2 <<'EOF'
+error: no clang on this machine can compile for wasm32-unknown-unknown, which
+       `ring` requires. Install one:
+
+         macOS   brew install llvm
+         NixOS   nix develop            (flake.nix sets this up for you)
+         Debian  apt install clang
+EOF
+  exit 1
+fi
+
+if [[ -z "${AR_wasm32_unknown_unknown:-}" ]]; then
+  AR_CANDIDATE="$(dirname "$CC_wasm32_unknown_unknown")/llvm-ar"
+  if [[ -x "$AR_CANDIDATE" ]]; then
+    export AR_wasm32_unknown_unknown="$AR_CANDIDATE"
+  elif command -v llvm-ar >/dev/null 2>&1; then
+    export AR_wasm32_unknown_unknown="$(command -v llvm-ar)"
+  fi
+fi
+
+echo "==> wasm cc: $CC_wasm32_unknown_unknown"
 
 echo "==> cargo build ($PROFILE)"
 # The `[@]+` guard is needed because macOS ships bash 3.2, where expanding an
