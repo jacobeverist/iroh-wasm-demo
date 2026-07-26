@@ -1,3 +1,6 @@
 /target
 /.tools
 /public/wasm
+
+.DS_Store
+/.idea/
