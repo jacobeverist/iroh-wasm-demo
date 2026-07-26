@@ -1,22 +1,22 @@
-# iroh in the browser — a WASM demo
+# iroh gossip in the browser — a WASM demo
 
-A minimal, self-contained demo that takes [**iroh**](https://docs.rs/iroh/latest/iroh/) — a Rust library for peer-to-peer QUIC with NAT traversal — compiles it to `wasm32-unknown-unknown`, and drives it from a plain JavaScript module running in a browser tab.
+A minimal, self-contained demo that takes [**iroh**](https://docs.rs/iroh/latest/iroh/) — a Rust library for peer-to-peer QUIC with NAT traversal — plus [**iroh-gossip**](https://docs.rs/iroh-gossip/latest/iroh_gossip/), compiles them to `wasm32-unknown-unknown`, and drives them from a plain JavaScript module running in a browser tab.
 
-Two tabs (or a tab and a terminal) establish a real authenticated, end-to-end-encrypted connection and echo bytes off each other.
+Everyone who joins the same room name lands in the same gossip swarm, and chat messages propagate peer-to-peer — including to peers you never connected to directly.
 
 ## What it demonstrates
 
-1. **Rust → WASM.** `src/echo.rs` is ordinary iroh code with no browser awareness. `src/wasm.rs` wraps it in `#[wasm_bindgen]`.
+1. **Rust → WASM.** `src/chat.rs` is ordinary iroh + iroh-gossip code with no browser awareness. `src/wasm.rs` wraps it in `#[wasm_bindgen]`.
 2. **JS imports the module.** `public/main.js` does `import init, { IrohNode } from "./wasm/iroh_wasm_demo.js"`.
-3. **JS queries the API.** It calls `IrohNode.alpn()`, `await IrohNode.spawn()`, `node.endpointId()`, `node.info()`, `await node.waitOnline()`, `node.events()`, `node.connect(id, payload)`. Rust `Stream`s arrive as JS `ReadableStream`s and Rust errors as JS exceptions.
-4. **The same Rust runs natively.** `src/bin/cli.rs` builds `echo.rs` into a terminal peer that can dial the browser.
+3. **JS queries the API.** It calls `IrohNode.alpn()`, `IrohNode.topicForRoom(name)`, `await IrohNode.spawn()`, `node.endpointId()`, `node.info()`, `await node.waitOnline()`, `await node.joinRoom(room, bootstrap, nick)`, then `room.events()` / `await room.broadcast(text)`. Rust `Stream`s arrive as JS `ReadableStream`s and Rust errors as JS exceptions.
+4. **The same Rust runs natively.** `src/bin/cli.rs` builds `chat.rs` into a terminal participant in the same swarm.
 
-The node is exposed as `globalThis.node`, so you can query the API by hand in the devtools console:
+`node` and `room` are on `globalThis`, so you can drive the API by hand in the devtools console:
 
 ```js
-node.endpointId()
 node.info()
-await node.connect("<peer id>", "hello")
+IrohNode.topicForRoom("lobby")
+await room.broadcast("hello")
 ```
 
 ## Quick start
@@ -26,13 +26,41 @@ await node.connect("<peer id>", "hello")
 ./serve.sh          # http://localhost:8080
 ```
 
-Then open <http://localhost:8080>, wait for `relay connected`, and either:
+Open <http://localhost:8080>, wait for `relay connected`, then join a room:
 
-- **browser ↔ browser** — click the share link to open a second tab, which auto-dials the first; or
-- **browser ↔ native** — run the printed command:
+- **browser ↔ browser** — join a room in the first tab, then click the share link. The second tab bootstraps off the first and auto-joins.
+- **browser ↔ native** — either direction works. Fastest is to start the terminal peer first and bootstrap a tab off its endpoint id:
   ```bash
-  cargo run --features cli -- connect <ENDPOINT_ID> "hi from the cli"
+  cargo run --features cli -- join "lobby"          # prints its endpoint id
+  # then open ?room=lobby&bootstrap=<that id>
   ```
+  Pointing the CLI at a browser tab (`--bootstrap <tab id>`) also works but can be slow to connect — see [Bootstrapping onto a browser tab can be slow](#bootstrapping-onto-a-browser-tab-can-be-slow).
+
+## How joining works
+
+A gossip **topic** is 32 bytes. To spare you copying one around, the room name is hashed: `topic = blake3(room_name)`, in `chat.rs::topic_for_room`. Type the same room name and you land on the same topic. That is a plain hash, not a secret — anyone who guesses the room name can join and read along.
+
+Messages are JSON `{nickname, text}` broadcast to the topic. Gossip **does not echo your own messages back to you**, so the UI prints what it sent locally.
+
+The neighbours list shows *direct* connections only. Gossip relays through them, so you routinely receive messages from participants who never appear in that list — that is the difference between gossip and a point-to-point protocol.
+
+## Gossip can't find the swarm for you
+
+Joining needs at least one **bootstrap** peer already on the topic. The first participant joins with an empty bootstrap list and waits. Everything in the UI that passes an endpoint id around exists to solve this one problem.
+
+### Bootstrapping *onto* a browser tab can be slow
+
+All three directions work, but they are not equally quick to connect. Measured here:
+
+| dialer → target | connects |
+|---|---|
+| browser → browser | seconds |
+| browser → native | seconds |
+| native → browser | **tens of seconds** — one attempt saw nothing within 25s, a retry connected within 70s |
+
+So if a native peer is given a fresh browser tab's endpoint id and nothing seems to happen, it is very likely not broken — wait longer before concluding anything. The likely reason is that a browser endpoint's address record has to propagate before a native peer's discovery can resolve it (browsers can't use DNS directly; iroh's `dns` module is compiled out under `wasm_browser`, so the two sides publish and resolve through different paths). That explanation is inferred from the timing, not instrumented.
+
+If you just want it to connect promptly, **start the CLI first** and bootstrap the browser off it. Once neighbours are established the swarm is fully bidirectional either way.
 
 `./build.sh --release` adds LTO, `opt-level = "z"`, symbol stripping and `wasm-opt`. Measured on this project: **15 MB debug → 2.6 MB release**, at the cost of a slower compile (~55s vs ~4s incremental).
 
@@ -168,7 +196,7 @@ A mismatch fails with `rust wasm file schema version ... doesn't match this bina
 ```
 .cargo/config.toml   why the getrandom rustflag is deliberately absent
 Cargo.toml           iroh (no default features) + the wasm glue
-src/echo.rs          the protocol — portable, shared by both builds
+src/chat.rs          gossip chat node — portable, shared by both builds
 src/wasm.rs          #[wasm_bindgen] surface exposed to JS
 src/lib.rs           module wiring
 src/bin/cli.rs       native peer (--features cli)
@@ -182,19 +210,22 @@ flake.nix/shell.nix  NixOS dev shell (see above; unevaluated)
 
 | JS | Returns | Notes |
 |---|---|---|
-| `IrohNode.alpn()` | `string` | the protocol id both peers must agree on |
-| `await IrohNode.spawn()` | `IrohNode` | binds an endpoint, starts accepting |
-| `node.endpointId()` | `string` | this node's public identity — what a peer dials |
+| `IrohNode.alpn()` | `string` | the gossip ALPN, `/iroh-gossip/1`. Shared by every gossip app — unlike a custom protocol it does not identify *this* one |
+| `IrohNode.topicForRoom(name)` | `string` | the topic hex a room name hashes to, without joining |
+| `await IrohNode.spawn()` | `IrohNode` | binds an endpoint, mounts gossip |
+| `node.endpointId()` | `string` | this node's public identity — what others bootstrap from |
 | `node.info()` | object | endpoint id, ALPN, relays, direct addrs, `relayOnly`, `isClosed` |
 | `await node.waitOnline()` | — | resolves once a relay connection is up |
-| `node.events()` | `ReadableStream` | incoming-connection events |
-| `node.connect(id, payload)` | `ReadableStream` | outgoing echo progress |
+| `await node.joinRoom(room, bootstrap, nick)` | `ChatRoom` | `bootstrap` is a comma/space separated id list; empty means "I'm first" |
 | `await node.shutdown()` | — | closes the endpoint |
+| `room.events()` | `ReadableStream` | topic events |
+| `await room.broadcast(text)` | — | send to everyone on the topic |
+| `room.topic()` / `room.nickname()` | `string` | |
 
-Event objects are tagged with `type`: `connected`, `sent`, `received`, `accepted`, `echoed`, `closed`.
+Event objects are tagged with `type`: `neighborUp`, `neighborDown`, `message`, `lagged`, `error`. On a `message`, `from` is who *delivered* it, which is not necessarily who wrote it — gossip relays through intermediate peers.
 
 ## Credits
 
-The protocol structure follows the upstream [`n0-computer/iroh-examples/browser-echo`](https://github.com/n0-computer/iroh-examples/tree/main/browser-echo), updated for iroh 1.0.3 and getrandom 0.4.
+Structure follows the upstream [`n0-computer/iroh-examples`](https://github.com/n0-computer/iroh-examples) browser examples, updated for iroh 1.0.3, iroh-gossip 0.101 and getrandom 0.4.
 
 Licensed MIT OR Apache-2.0, matching iroh.

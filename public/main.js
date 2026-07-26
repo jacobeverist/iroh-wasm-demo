@@ -1,11 +1,15 @@
 // The JavaScript side of the demo.
 //
-// This file does the whole point of the exercise: import a Rust p2p library
-// that was compiled to WebAssembly, instantiate it, and call its API.
+// Imports a Rust p2p library (iroh + iroh-gossip) compiled to WebAssembly,
+// instantiates it, and drives its API to run a gossip chat room.
 
 import init, { IrohNode } from "./wasm/iroh_wasm_demo.js";
 
 const $ = (sel) => document.querySelector(sel);
+
+// Direct neighbours, i.e. peers we hold a connection to. Gossip relays through
+// them, so this is a subset of who is actually in the room.
+const neighbors = new Set();
 
 main().catch((err) => {
   // Without this the page would just stop, with the reason buried in devtools.
@@ -28,17 +32,14 @@ async function main() {
   // 2. Query the library's API.
   // -------------------------------------------------------------------------
 
-  // A static method on the exported Rust type.
-  log(`protocol ALPN: <code>${IrohNode.alpn()}</code>`);
+  // Static methods on the exported Rust type.
+  log(`gossip ALPN: <code>${IrohNode.alpn()}</code>`);
 
   log("binding iroh endpoint …");
   const node = await IrohNode.spawn(); // async Rust constructor -> JS Promise
   log("endpoint bound", "ok");
-
-  // Handy for poking at the API from the devtools console.
   globalThis.node = node;
 
-  // A synchronous getter returning a Rust String.
   const endpointId = node.endpointId();
   $("#endpoint-id").textContent = endpointId;
   $("#identity").hidden = false;
@@ -46,74 +47,120 @@ async function main() {
   // A Rust struct serialised into a plain JS object.
   log("node.info() immediately after bind:");
   renderInfo(node.info());
-  console.log("iroh info (pre-online):", node.info());
 
-  // Relays are the only transport a browser gets, so wait for one to come up.
   log("waiting for a relay connection …");
   await node.waitOnline();
   log("relay connected — endpoint is reachable", "ok");
-
-  log("node.info() after coming online:");
   renderInfo(node.info());
   console.table(node.info());
 
   // -------------------------------------------------------------------------
-  // 3. Use the API: accept incoming echoes, and dial out.
+  // 3. Join a gossip topic.
   // -------------------------------------------------------------------------
 
-  $("#share-link").href = shareLink(endpointId);
-  $("#share-link").textContent = shareLink(endpointId);
-  $("#cli-cmd").textContent =
-    `cargo run --features cli -- connect ${endpointId} "hi from the cli"`;
-  $("#live").hidden = false;
+  const url = new URL(location.href);
+  const prefillRoom = url.searchParams.get("room");
+  const prefillBootstrap = url.searchParams.get("bootstrap");
+  if (prefillRoom) $("[name=room]").value = prefillRoom;
+  if (prefillBootstrap) $("[name=bootstrap]").value = prefillBootstrap;
+  if (!$("[name=nickname]").value) {
+    $("[name=nickname]").value = `tab-${endpointId.slice(0, 4)}`;
+  }
+  $("#join-section").hidden = false;
 
-  $("#copy-id").addEventListener("click", async () => {
-    await navigator.clipboard.writeText(endpointId);
-    $("#copy-id").textContent = "copied";
-    setTimeout(() => ($("#copy-id").textContent = "copy"), 1200);
-  });
-
-  // A Rust Stream surfaced as a JS ReadableStream.
-  (async () => {
-    for await (const event of iterate(node.events())) {
-      console.log("incoming:", event);
-      logPeer($("#incoming"), event.endpointId, describe(event));
-    }
-  })().catch((err) => log(`incoming event stream failed: ${err}`, "err"));
-
-  $("#connect-form").addEventListener("submit", async (e) => {
+  $("#join-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const form = new FormData(e.target);
-    const peer = form.get("endpoint-id").trim();
-    const payload = form.get("payload");
-    if (!peer || !payload) return;
+    const roomName = form.get("room").trim();
+    const nickname = form.get("nickname").trim() || "anon";
+    const bootstrap = form.get("bootstrap").trim();
+    if (!roomName) return;
 
-    if (peer === endpointId) {
-      logPeer($("#outgoing"), peer, "that's this tab's own id — open a second tab", "err");
+    // Show which swarm we're about to join before joining it.
+    log(`room "${roomName}" hashes to topic <code>${IrohNode.topicForRoom(roomName)}</code>`);
+    log(bootstrap ? "joining via bootstrap peer …" : "joining with no bootstrap — you are first");
+
+    let room;
+    try {
+      room = await node.joinRoom(roomName, bootstrap, nickname);
+    } catch (err) {
+      log(`join failed: ${err}`, "err");
       return;
     }
+    globalThis.room = room;
 
-    logPeer($("#outgoing"), peer, `dialing with payload "${payload}" …`);
-    try {
-      // Rust returns a ReadableStream of progress events.
-      for await (const event of iterate(node.connect(peer, payload))) {
-        console.log("outgoing:", event);
-        logPeer($("#outgoing"), peer, describe(event), event.error ? "err" : undefined);
+    $("#join-section").hidden = true;
+    $("#live").hidden = false;
+    $("#topic").textContent = room.topic();
+
+    const share = shareLink(roomName, endpointId);
+    $("#share-link").href = share;
+    $("#share-link").textContent = share;
+    // Dialing into a browser tab works but can take tens of seconds, so offer
+    // both orderings: bootstrap off this tab, or start the CLI bare and
+    // bootstrap a tab off it (which connects promptly).
+    $("#cli-cmd").textContent =
+      `cargo run --features cli -- join ${JSON.stringify(roomName)} --bootstrap ${endpointId}\n` +
+      `# ...or start it bare and bootstrap a tab off its id (usually faster):\n` +
+      `cargo run --features cli -- join ${JSON.stringify(roomName)}`;
+
+    log(`joined as "${nickname}"`, "ok");
+    renderNeighbors();
+
+    // A Rust Stream surfaced as a JS ReadableStream.
+    (async () => {
+      for await (const event of iterate(room.events())) {
+        console.log("gossip event", event);
+        handleEvent(event);
       }
-    } catch (err) {
-      // Rust errors arrive as real JS exceptions.
-      logPeer($("#outgoing"), peer, `failed: ${err}`, "err");
-    }
+    })().catch((err) => log(`event stream failed: ${err}`, "err"));
+
+    $("#say-form").addEventListener("submit", async (e2) => {
+      e2.preventDefault();
+      const text = new FormData(e2.target).get("text").trim();
+      if (!text) return;
+      e2.target.reset();
+      try {
+        await room.broadcast(text);
+        // Gossip does not deliver our own messages back to us, so echo locally.
+        addMessage(nickname, text, "self");
+      } catch (err) {
+        addMessage("!", `send failed: ${err}`, "err");
+      }
+    });
   });
 
-  // If we were opened from a share link, prefill and auto-dial.
-  const url = new URL(location.href);
-  const peer = url.searchParams.get("connect");
-  if (peer) {
-    $("[name=endpoint-id]").value = peer;
-    $("[name=payload]").value =
-      url.searchParams.get("payload") || "hi from the browser";
-    $("#connect-form").requestSubmit();
+  // Arriving via a share link means the room and bootstrap are already known.
+  if (prefillRoom && prefillBootstrap) {
+    $("#join-form").requestSubmit();
+  }
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case "neighborUp":
+      neighbors.add(event.endpointId);
+      renderNeighbors();
+      addMessage("*", `${short(event.endpointId)} joined the swarm`, "sys");
+      break;
+    case "neighborDown":
+      neighbors.delete(event.endpointId);
+      renderNeighbors();
+      addMessage("*", `${short(event.endpointId)} left the swarm`, "sys");
+      break;
+    case "message":
+      // `from` is who *delivered* it, not necessarily who wrote it — gossip
+      // relays through intermediate peers.
+      addMessage(event.nickname, event.text, undefined, event.from);
+      break;
+    case "lagged":
+      addMessage("*", "lagged — some messages were dropped", "err");
+      break;
+    case "error":
+      addMessage("*", `error: ${event.error}`, "err");
+      break;
+    default:
+      addMessage("*", JSON.stringify(event), "sys");
   }
 }
 
@@ -136,22 +183,33 @@ async function* iterate(stream) {
   }
 }
 
-function describe(event) {
-  switch (event.type) {
-    case "connected":
-      return "connected";
-    case "sent":
-      return `sent ${event.bytesSent} byte(s)`;
-    case "received":
-      return `echoed back ${event.bytesReceived} byte(s): "${event.text}"`;
-    case "accepted":
-      return "accepted a connection";
-    case "echoed":
-      return `echoed ${event.bytesSent} byte(s) back`;
-    case "closed":
-      return event.error ? `closed with error: ${event.error}` : "closed cleanly";
-    default:
-      return JSON.stringify(event);
+function addMessage(who, text, className, via) {
+  const el = document.createElement("div");
+  el.className = `line ${className || ""}`;
+  const relay = via && via !== who ? ` <span class="time">via ${short(via)}</span>` : "";
+  el.innerHTML =
+    `<span class="time">${stamp()}</span><b>${escapeHtml(who)}</b> ${escapeHtml(text)}${relay}`;
+  const box = $("#messages");
+  box.append(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderNeighbors() {
+  const box = $("#neighbors");
+  box.textContent = "";
+  $("#neighbor-count").textContent = `(${neighbors.size})`;
+  if (neighbors.size === 0) {
+    const el = document.createElement("div");
+    el.className = "line muted";
+    el.textContent = "none yet — waiting for someone to connect";
+    box.append(el);
+    return;
+  }
+  for (const id of neighbors) {
+    const el = document.createElement("div");
+    el.className = "line";
+    el.textContent = id;
+    box.append(el);
   }
 }
 
@@ -179,29 +237,31 @@ function log(html, className) {
   $("main").append(el);
 }
 
-function logPeer(container, peer, message, className) {
-  let box = container.querySelector(`[data-peer="${peer}"]`);
-  if (!box) {
-    box = document.createElement("div");
-    box.className = "peer";
-    box.dataset.peer = peer;
-    box.innerHTML = `<h4>${peer}</h4>`;
-    container.append(box);
-  }
-  const el = document.createElement("div");
-  el.className = `line ${className || ""}`;
-  el.innerHTML = `<span class="time">${stamp()}</span>${message}`;
-  box.append(el);
+function short(id) {
+  return id.slice(0, 8);
 }
 
 function stamp() {
   return new Date().toISOString().substring(11, 19);
 }
 
-function shareLink(id) {
+function escapeHtml(s) {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
+}
+
+function shareLink(room, bootstrapId) {
   const url = new URL(location.href);
   url.search = "";
-  url.searchParams.set("connect", id);
-  url.searchParams.set("payload", "hi from the other tab");
+  url.searchParams.set("room", room);
+  url.searchParams.set("bootstrap", bootstrapId);
   return url.toString();
 }
+
+$("#copy-id").addEventListener("click", async () => {
+  await navigator.clipboard.writeText($("#endpoint-id").textContent);
+  $("#copy-id").textContent = "copied";
+  setTimeout(() => ($("#copy-id").textContent = "copy"), 1200);
+});

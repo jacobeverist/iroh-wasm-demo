@@ -184,6 +184,32 @@ table.info .value {
 
 .connections {
   min-height: 3rem;
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: 0.5rem 0.7rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.line.sys {
+  color: var(--muted);
+}
+
+.line.self b {
+  color: var(--accent);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.75rem;
+}
+
+#say-form {
+  margin-top: 0.75rem;
 }
 
 .peer {

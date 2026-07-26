@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>iroh in the browser — WASM demo</title>
+    <title>iroh gossip in the browser — WASM demo</title>
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%237aa2f7'/%3E%3C/svg%3E"
@@ -13,17 +13,21 @@
   </head>
   <body>
     <header>
-      <h1>iroh in the browser</h1>
+      <h1>iroh gossip in the browser</h1>
       <p>
         The Rust p2p library <a href="https://docs.rs/iroh/latest/iroh/" target="_blank" rel="noopener">iroh</a>
-        compiled to WebAssembly, imported by a plain JavaScript module, and driven
-        entirely from this page. Open the devtools console — <code>node</code> is
-        on <code>globalThis</code>, so you can call the API by hand.
+        and <a href="https://docs.rs/iroh-gossip/latest/iroh_gossip/" target="_blank" rel="noopener">iroh-gossip</a>
+        compiled to WebAssembly, imported by a plain JavaScript module. Everyone
+        who joins the same room name joins the same gossip swarm, and messages
+        propagate peer-to-peer. Open the devtools console — <code>node</code> and
+        <code>room</code> are on <code>globalThis</code>.
       </p>
       <p class="note">
-        Browsers cannot open UDP sockets, so iroh has no way to hole-punch here:
-        every connection is tunnelled over a WebSocket to a relay. Traffic stays
-        end-to-end encrypted, so the relay forwards bytes it cannot read.
+        Gossip can't find the swarm for you: joining needs one <b>bootstrap</b>
+        peer already on the topic. The first tab joins alone; later tabs use the
+        share link, which carries a bootstrap id. Browsers are also relay-only —
+        no UDP in the sandbox means every connection is tunnelled over a
+        WebSocket to a relay, still end-to-end encrypted.
       </p>
     </header>
 
@@ -37,35 +41,61 @@
 
     <main></main>
 
+    <section id="join-section" hidden>
+      <h2>join a room</h2>
+      <form id="join-form">
+        <label>
+          room name
+          <input name="room" value="lobby" autocomplete="off" />
+        </label>
+        <label>
+          your nickname
+          <input name="nickname" placeholder="anon" autocomplete="off" />
+        </label>
+        <label>
+          bootstrap peer (blank = you're first)
+          <input name="bootstrap" placeholder="endpoint id of someone already here" autocomplete="off" />
+        </label>
+        <button type="submit">join</button>
+      </form>
+    </section>
+
     <section id="live" hidden>
-      <h2>connect to a peer</h2>
+      <h2>room</h2>
       <p>
-        Open this link in a second tab and it will dial this one automatically:<br />
+        topic <code id="topic" class="id"></code>
+      </p>
+      <p>
+        Invite someone — this link bootstraps off this tab:<br />
         <a id="share-link" target="_blank" rel="noopener"></a>
       </p>
-      <p>Or dial from a terminal, using the same Rust code built natively:</p>
+      <p>
+        A terminal peer can join too — the same Rust, built natively. Dialing
+        <i>into</i> a browser tab works but can take tens of seconds while the
+        tab's address record propagates, so be patient. For a prompt
+        connection, start the CLI first and bootstrap a tab off its id instead.
+      </p>
       <pre><code id="cli-cmd"></code></pre>
-
-      <form id="connect-form">
-        <label>
-          peer endpoint id
-          <input name="endpoint-id" placeholder="paste the other tab's id" autocomplete="off" />
-        </label>
-        <label>
-          payload to echo
-          <input name="payload" value="hello over a relay" autocomplete="off" />
-        </label>
-        <button type="submit">connect</button>
-      </form>
 
       <div class="columns">
         <div>
-          <h3>outgoing</h3>
-          <div id="outgoing" class="connections"></div>
+          <h3>messages</h3>
+          <div id="messages" class="connections"></div>
+          <form id="say-form">
+            <label>
+              message
+              <input name="text" placeholder="say something" autocomplete="off" />
+            </label>
+            <button type="submit">send</button>
+          </form>
         </div>
         <div>
-          <h3>incoming</h3>
-          <div id="incoming" class="connections"></div>
+          <h3>neighbours <span id="neighbor-count" class="muted"></span></h3>
+          <div id="neighbors" class="connections"></div>
+          <p class="muted small">
+            Direct connections only. Gossip relays through them, so you can
+            receive from peers that never appear in this list.
+          </p>
         </div>
       </div>
     </section>

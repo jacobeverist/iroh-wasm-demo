@@ -1,9 +1,9 @@
-//! iroh compiled to WebAssembly, exposed to JavaScript.
+//! iroh + iroh-gossip compiled to WebAssembly, exposed to JavaScript.
 //!
-//! `echo` is portable Rust shared with the native CLI binary; `wasm` is the
+//! `chat` is portable Rust shared with the native CLI binary; `wasm` is the
 //! thin `#[wasm_bindgen]` layer that only exists for the browser build.
 
-pub mod echo;
+pub mod chat;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
