@@ -74,6 +74,29 @@ Three things have to line up, and NixOS supplies none of them ambiently:
 
 The `clang_multi` advice floating around iroh issue threads addresses a *different* failure (a missing 32-bit compiler surfacing as `ToolNotFound: Is 'clang' installed?`). If `build.sh` reports it can't find a wasm-capable clang, that message — not `clang_multi` — is the one to act on.
 
+### Troubleshooting: "Relative references must start with `/`, `./`, or `../`"
+
+The build succeeds, the page loads, and then the console rejects the module import. **This is a link error wearing a disguise, not a path problem** — there is nothing wrong with the `import` in `main.js`.
+
+What happened: the `.wasm` came out with undefined symbols. The linker turns those into imports from a module conventionally named `env`, wasm-bindgen faithfully emits `import * as __wbg_star0 from 'env';` into the glue, and the browser refuses `env` because it is a bare specifier rather than a relative path. See [wasm-bindgen#2215](https://github.com/rustwasm/wasm-bindgen/issues/2215).
+
+Confirm it in two commands:
+
+```bash
+grep -n "^import" public/wasm/iroh_wasm_demo.js          # a line ending `from 'env'` is the smoking gun
+wasm-dis public/wasm/iroh_wasm_demo_bg.wasm | grep -oE '\(import "[^"]+" "[^"]+"' | sort -u
+```
+
+A healthy build imports **only** from `./iroh_wasm_demo_bg.js`. Anything else — `env` especially — names the module whose symbols went undefined, and the second command names the symbols themselves.
+
+The usual cause here is the C in `ring` being compiled by a clang that injects flags the bare-metal wasm target cannot satisfy. On NixOS that is specifically the **cc wrapper**, whose hardening adds a stack protector and therefore a reference to `__stack_chk_fail` that nothing defines. Fixes, in order:
+
+1. `nix develop` — the shell uses `llvmPackages.clang-unwrapped` and sets `hardeningDisable`, which addresses exactly this.
+2. If you are rolling your own shell, don't hand `cc-rs` the wrapped `clang`; set `CC_wasm32_unknown_unknown` to `${llvmPackages.clang-unwrapped}/bin/clang` and add `hardeningDisable = [ "all" ];`.
+3. If a symbol other than `__stack_chk_fail` shows up, the second command above identifies it — that points at whichever crate or C dependency isn't wasm-clean, rather than at the toolchain.
+
+`build.sh` now fails the build if any bare specifier reaches the generated glue, and prints the offending wasm imports, so this should surface at build time rather than in the browser.
+
 ## The one architectural caveat: browsers are relay-only
 
 iroh's headline feature is hole-punching direct peer-to-peer connections. **You do not get that in a browser.** The sandbox has no API for sending UDP packets, so iroh falls back to tunnelling QUIC over a WebSocket to a relay server, and every byte is forwarded by the relay.

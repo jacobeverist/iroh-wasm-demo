@@ -63,6 +63,15 @@
             CC_wasm32_unknown_unknown = wasmCC;
             AR_wasm32_unknown_unknown = wasmAR;
 
+            # Hardening flags emit symbols the wasm target cannot satisfy (e.g.
+            # __stack_chk_fail). Those become undefined symbols, the linker turns
+            # them into imports from module `env`, and the page then dies with
+            # "Relative references must start with ./". Using the unwrapped clang
+            # already avoids the wrapper that injects them; these two are belt
+            # and braces. build.sh fails the build if any slip through.
+            hardeningDisable = [ "all" ];
+            CFLAGS_wasm32_unknown_unknown = "-fno-stack-protector";
+
             shellHook = ''
               echo "iroh-wasm-demo dev shell"
               echo "  rustc         $(rustc --version 2>/dev/null)"

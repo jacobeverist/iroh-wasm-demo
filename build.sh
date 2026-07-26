@@ -148,6 +148,44 @@ BINDGEN_ARGS=(--target web --weak-refs --out-dir "$OUT_DIR")
 [[ "$PROFILE" == "debug" ]] && BINDGEN_ARGS+=(--debug)
 "$WBG_BIN" "$WASM_IN" "${BINDGEN_ARGS[@]}"
 
+# --- 3b. reject bare module specifiers --------------------------------------
+# If the .wasm ends up with undefined symbols, the linker turns them into
+# imports from a module conventionally named `env`, and wasm-bindgen faithfully
+# emits `import * as __wbg_star0 from 'env';`. That is a bare specifier, so the
+# page dies at load time with:
+#
+#   Failed to resolve module specifier 'env'.
+#   Relative references must start with either "/", "./", or "../".
+#
+# which is a baffling way to be told you had a link error. Catch it at build
+# time instead. A healthy build imports nothing but relative paths.
+
+BARE_IMPORTS=$(grep -nE "^[[:space:]]*import\b.*from[[:space:]]*['\"][^./]" "$OUT_DIR/$CRATE.js" || true)
+if [[ -n "$BARE_IMPORTS" ]]; then
+  {
+    echo "error: the generated glue imports a bare module specifier:"
+    echo "$BARE_IMPORTS" | sed 's/^/         /'
+    echo
+    echo "       This means the wasm has undefined symbols. The browser would"
+    echo "       fail with \"Relative references must start with ./\"."
+    echo
+    echo "       Imported wasm modules (anything other than a ./relative path"
+    echo "       is the culprit):"
+    if command -v wasm-dis >/dev/null 2>&1; then
+      wasm-dis "$OUT_DIR/${CRATE}_bg.wasm" 2>/dev/null |
+        grep -oE '\(import "[^"]+" "[^"]+"' | sort -u | sed 's/^/         /' | head -40
+    else
+      echo "         (install binaryen for the symbol list: wasm-dis)"
+    fi
+    echo
+    echo "       Usual cause is the C in \`ring\` being compiled by a clang that"
+    echo "       injects flags the wasm target cannot satisfy -- notably the"
+    echo "       nixpkgs cc WRAPPER, whose hardening adds __stack_chk_fail."
+    echo "       Use an unwrapped clang; on NixOS \`nix develop\` does this."
+  } >&2
+  exit 1
+fi
+
 # --- 4. optionally shrink ---------------------------------------------------
 if [[ "$PROFILE" == "release" ]] && command -v wasm-opt >/dev/null 2>&1; then
   echo "==> wasm-opt -Os"

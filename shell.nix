@@ -31,4 +31,9 @@ pkgs.mkShell {
 
   CC_wasm32_unknown_unknown = wasmCC;
   AR_wasm32_unknown_unknown = wasmAR;
+
+  # See flake.nix: hardening flags produce symbols wasm cannot satisfy, which
+  # surface in the browser as "Relative references must start with ./".
+  hardeningDisable = [ "all" ];
+  CFLAGS_wasm32_unknown_unknown = "-fno-stack-protector";
 }
